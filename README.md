@@ -111,6 +111,7 @@ The `examples/` directory contains several demonstration scripts:
 
 - `basic_flash_calculation.py`: Basic phase split calculation
 - `train_model_example.py`: Training a deep learning model
+- `complete_workflow.py`: Complete workflow from data generation to predictions
 
 Run an example:
 

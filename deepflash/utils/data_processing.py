@@ -51,13 +51,13 @@ def generate_sample_compositions(n_components: int, n_samples: int,
     Returns:
         Array of shape (n_samples, n_components) with normalized compositions
     """
-    if random_state is not None:
-        np.random.seed(random_state)
+    # Use numpy's recommended random generator for better state management
+    rng = np.random.default_rng(random_state)
     
     # Generate random compositions using Dirichlet distribution
     # This ensures compositions sum to 1
     alpha = np.ones(n_components)
-    compositions = np.random.dirichlet(alpha, size=n_samples)
+    compositions = rng.dirichlet(alpha, size=n_samples)
     
     return compositions
 
@@ -79,15 +79,15 @@ def create_training_data(n_components: int, n_samples: int,
     Returns:
         Dictionary with 'inputs' and 'targets' arrays
     """
-    if random_state is not None:
-        np.random.seed(random_state)
+    # Use numpy's recommended random generator for better state management
+    rng = np.random.default_rng(random_state)
     
     # Generate compositions
     compositions = generate_sample_compositions(n_components, n_samples, random_state)
     
     # Generate temperatures and pressures
-    temperatures = np.random.uniform(temperature_range[0], temperature_range[1], n_samples)
-    pressures = np.random.uniform(pressure_range[0], pressure_range[1], n_samples)
+    temperatures = rng.uniform(temperature_range[0], temperature_range[1], n_samples)
+    pressures = rng.uniform(pressure_range[0], pressure_range[1], n_samples)
     
     # Normalize for neural network input
     T_norm = temperatures / 500.0
