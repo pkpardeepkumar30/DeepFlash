@@ -5,6 +5,7 @@ version = "0.1.0"
 
 [deps]
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 Clapeyron = "7c7805af-46cc-48c9-995b-ed0ed2dc909a"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
@@ -37,6 +38,7 @@ XLSX = "fdbf4ff8-1666-58a4-91e7-1b58723a45e0"
 
 [compat]
 CSV = "0.10.15"
+CUDA = "5.9.4"
 Distributions = "0.25.122"
 FixedPointAcceleration = "1.0.1"
 JLD2 = "0.6.2"

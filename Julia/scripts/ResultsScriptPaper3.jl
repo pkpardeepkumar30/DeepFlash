@@ -3,11 +3,10 @@ if false
     include("../src/Sols.jl")
     using .MultiComponent
 end
-
-# using MultiComponent
 # cd("Pipelines/scripts/")
 using Pkg
-Pkg.activate(".")
+Pkg.activate("./Julia/")
+using Revise  # Load Revise AFTER activating environment but BEFORE loading your package
 using CO2Transport
 using CO2Transport.MultiComponent
 # using Clapeyron
@@ -68,3 +67,18 @@ run_flash_calculations(Problems.prob_3, model_1_4)
 run_flash_calculations(Problems.prob_4, model_1_4)
 run_flash_calculations(Problems.prob_5, model_5_6)
 run_flash_calculations(Problems.prob_6, model_5_6)
+
+using CUDA
+CUDA.versioninfo()
+A1 = CuArray(rand(Float32, 10000, 10000))
+B1 = CuArray(rand(Float32, 10000, 10000))
+
+@time C1 = A1 * B1 # Runs on GPU using cuBLAS
+
+A = rand(Float32, 10000, 10000)
+B = rand(Float32, 10000, 10000)
+
+@time C = A * B  # Runs on GPU using cuBLAS
+CUDA.functional()
+CUDA.synchronize()
+

@@ -277,6 +277,7 @@ end
 
 function solve_UVFlash_QFuncVer2(U_spec, V_spec, N_spec; initial_guess = nothing, model, ϵ=0.0, stability_cache=nothing, useNewtonJulia=true, maxiter=300)
     # @show U_spec, V_spec, N_spec
+    
     nc = model.Nc
     T_stab = compute_single_phase_state(U_spec, V_spec, N_spec, model)
     if isnothing(initial_guess)
