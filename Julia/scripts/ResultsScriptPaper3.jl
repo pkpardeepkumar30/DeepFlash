@@ -7,6 +7,7 @@ end
 using Pkg
 Pkg.activate("./Julia/")
 using Revise  # Load Revise AFTER activating environment but BEFORE loading your package
+
 using CO2Transport
 using CO2Transport.MultiComponent
 # using Clapeyron
@@ -82,3 +83,18 @@ B = rand(Float32, 10000, 10000)
 CUDA.functional()
 CUDA.synchronize()
 
+A = cu(rand(Float32, 3, 3))
+b = cu(rand(Float32, 3))
+A \ b
+
+using CUDA
+
+dev = CUDA.device()
+
+println("Name: ", CUDA.name(dev))
+println("Compute Capability: ", CUDA.capability(dev))
+println("SM count: ", CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT))
+println("Warp size: ", CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_WARP_SIZE))
+println("Max threads/block: ", CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK))
+println("Concurrent kernels: ", CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_CONCURRENT_KERNELS))
+println("Async engines: ", CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_ASYNC_ENGINE_COUNT))

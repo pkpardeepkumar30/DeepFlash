@@ -1,6 +1,6 @@
 module CO2Transport
 # include("Solvers.jl")
-
+using Revise
 include("MultiComponent.jl")
 # include("MultiComponent.jl")
 include("utils.jl")

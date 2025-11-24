@@ -132,7 +132,7 @@ function attempt_two_phase_flash(initial_guess, U_spec, V_spec, N_spec, model,
         g, H,
         initial_guess, 
         cons; 
-        tol=1e-10, 
+        tol=1e-6, 
         maxiter=1000,
         V_total=V_spec, 
         N_total=N_spec
@@ -214,7 +214,7 @@ function solve_UVFlash_QFuncVer3(U_spec, V_spec, N_spec; initial_guess = nothing
         g, H,
         initial_guess, 
         cons; 
-        tol=1e-10, 
+        tol=1e-6, 
         maxiter=1000,
         V_total=V_spec, 
         N_total=N_spec
@@ -345,6 +345,7 @@ end
 
 function stability_analysis_fallback(U_spec, V_spec, N_spec, model, T_stab, S_one, 
                                      Scale, numPhases, useNewtonJulia, stability_cache)
+                                     
     stab = Stability.VT_stabilityAnalysis(; model, T_spec=T_stab, V_spec, z_spec=N_spec, stability_cache)
     # initial_approximations = Stability.generate_all_initial_approximations(T_stab, V_spec, N_spec, model)
     # N_G = initial_approximations[1][2:end]

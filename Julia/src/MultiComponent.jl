@@ -1,4 +1,5 @@
 module MultiComponent
+using Revise
 using ExportAll
 using ForwardDiff
 # using Zygote
