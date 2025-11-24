@@ -1,0 +1,18 @@
+# /input/
+*output/
+/data/
+../Julia/
+/docs/build/
+*.png
+*.pdf
+*.jpg
+*.jpeg
+*.csv
+*.xls
+*.xlsx
+*.txt
+*Manifest.toml
+/.vscode/
+*.wav
+*.js
+C:/Pardeep/trunk/CO2Transport/Castier/
