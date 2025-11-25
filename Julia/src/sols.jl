@@ -346,7 +346,7 @@ end
 function stability_analysis_fallback(U_spec, V_spec, N_spec, model, T_stab, S_one, 
                                      Scale, numPhases, useNewtonJulia, stability_cache)
                                      
-    stab = Stability.VT_stabilityAnalysis(; model, T_spec=T_stab, V_spec, z_spec=N_spec, stability_cache)
+    stab = Stability.VT_stabilityAnalysis(; model, T_spec=T_stab, V_spec, z_spec=N_spec)
     # initial_approximations = Stability.generate_all_initial_approximations(T_stab, V_spec, N_spec, model)
     # N_G = initial_approximations[1][2:end]
     # V_G = initial_approximations[1][1]
