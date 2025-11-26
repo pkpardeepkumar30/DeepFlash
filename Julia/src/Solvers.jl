@@ -58,8 +58,6 @@ function second_order_linesearch(f, grad_f, x, Δx; α=0.5, β=0.8)
     return α_current
 end
 
-
-
 # Convert vector residual to scalar objective function
 function objective_from_residuals(r)
     return x -> 0.5 * sum(abs2, r(x))  # F(x) = ½‖r(x)‖²
@@ -104,27 +102,90 @@ function third_order_linesearch(f, x, Δx; α=0.5, β=0.8)
     return α_current
 end
 
-function newton(f, grad_f, hess_f, x0; tol=1e-8, maxiter=100)
+function backtracking_linesearch(f, x, fx, J, Δx; c=1e-4, β=0.5, max_ls=10)
+    α = 1.0
 
+    φ_x = 0.5 * norm(fx)^2                # current merit value
+    g  = J' * fx                          # grad(φ)
+    directional_derivative = dot(g, Δx)   # scalar
+
+    @inbounds for k in 1:max_ls
+        x_trial = x .+ α .* Δx
+        Fx_trial = f(x_trial)
+        φ_trial = 0.5 * norm(Fx_trial)^2
+
+        if φ_trial <= φ_x + c * α * directional_derivative
+            return α                      # accept step size
+        end
+
+        α *= β
+    end
+
+    return α
+end
+
+function newton2(f, grad_f, hess_f, x0; tol=1e-8, maxiter=100, c=1e-4, β=0.5)
+    
     x = copy(x0)
-    α_current = 1.0
-
+    α = 1.0
+    
     for iter = 1:maxiter
-        grad_fx = grad_f(x)
-        hess_fx = hess_f(x)
-        Δx = -hess_fx \ grad_fx
+        fx = f(x)
+        J = grad_f(x)
+        Δx = -(J + 1e-10*I) \ fx  # Regularized Jacobian (GPU-friendly)
         
-        # Update solution
-        x .+= α_current * Δx
+        # Backtracking line search on merit function
+        α = backtracking_linesearch(f, x, fx, J, Δx; c=c, β=β)
+        
         rel_tol = converged(x, Δx; tol)
 
         if rel_tol
-            @show "converged in iter: $iter"
             return x, true, iter
         end
+
+        x .+= α * Δx
     end
 
     println("Max iterations reached without convergence.")
+    return x, false, maxiter
+end
+
+function newton(f, grad_f, hess_f, x0; tol=1e-8, maxiter=100, 
+                c1=1e-4, beta=0.5)
+
+    x = copy(x0)
+    
+    for iter = 1:maxiter
+        g = grad_f(x)
+        H = hess_f(x)
+
+        # Regularized Hessian (GPU-friendly, avoids singularity)
+        Δx = -(H + 1e-12*I) \ g
+
+        # --- Armijo backtracking line search ---
+        α = 1.0
+        f_x = f(x)
+        g_dot_dx = dot(g, Δx)
+
+        # decrease condition: f(x + αΔx) ≤ f(x) + c1 α gᵀΔx
+        while f(x .+ α .* Δx) > f_x + c1 * α * g_dot_dx
+            α *= beta                      # reduce step size
+            if α < 1e-8                    # safeguard
+                break
+            end
+        end
+
+        # update
+        x_new = x .+ α .* Δx
+
+        # convergence check
+        if norm(x_new - x, Inf) < tol && norm(g, Inf) < tol
+            return x_new, true, iter
+        end
+
+        x = x_new
+    end
+
     return x, false, maxiter
 end
 
@@ -143,7 +204,7 @@ function newton_mixed(f, g, H, x0; tol=1e-8, maxiter=100)
     # @show tol
     
     tol = 1e-10
-    @show chanigng_tol = tol
+    # @show chanigng_tol = tol
     x = CuArray(x0)
     for iter in 1:maxiter
         # Compute derivatives on CPU with ForwardDiff
@@ -159,7 +220,7 @@ function newton_mixed(f, g, H, x0; tol=1e-8, maxiter=100)
         rel_tol = converged(x_cpu, Δx_cpu; tol)
         
         if rel_tol            
-            @show "converged in iter: $iter"
+            # @show "converged in iter: $iter"
             return x_cpu, true, iter
         end
     end

@@ -8,6 +8,7 @@ using NLsolve
 using StaticArrays
 using ..EOS
 using ..CubicFuncs
+using ..Solvers
 # using ..Solvers
 using Random
 using FixedPointAcceleration
@@ -79,17 +80,25 @@ end
 
 # c is the vector of concentrations, c_i = N_i / V, V is the volume of the phase p
 function stability(c::MVector; T_spec, V_spec, N_spec::MVector, model)
-    # @show c, T_spec, V_spec, N_spec
+    
     c_spec = N_spec ./ V_spec
     μ_ref = μ_EOS(T_spec, 1.0, c_spec; model)
-    function create_prob(y::MVector)
+    function create_prob(y::MVector) 
         x = exp.(y)        
-        Δμs = μ_EOS(T_spec, 1.0, x; model) - μ_ref
+        Δμs = μ_EOS(T_spec, 1.0, x; model) - μ_ref    
+        # MVector(Δμs...)         
         # chem_pot_diff = chem_pot(T_spec, 1.0, x; model) .- chem_pot(T_spec, 1.0, c_spec; model)
     end
-    sol = nlsolve(create_prob, log.(c), xtol=1e-8, ftol=1e-8, method=:newton, linesearch=LineSearches.BackTracking(order=3))
-    # MVector(exp.(sol.zero)...)
-    exp.(sol.zero)
+    
+    # f = create_prob
+    g(x) = ForwardDiff.jacobian(create_prob, x)
+    H(x) = ForwardDiff.hessian(create_prob, x)
+    x0 = MVector{length(c)}(log.(c))
+    x, converged, iters = Solvers.newton2(create_prob, g, H, x0; tol=1e-8, maxiter=50)
+    sol1 = exp.(x)
+    
+    # sol2 = nlsolve(create_prob, log.(c), xtol=1e-8, ftol=1e-8, method=:newton, linesearch=LineSearches.BackTracking(order=3))
+    # exp.(sol2.zero)
     # sol.zero
 end
 
@@ -124,17 +133,7 @@ function is_approximately_equal(a, b; atol=1e-1)
     return length(a) == length(b) && all(abs.(a .- b) .< atol)
 end
 
-function array_hash_key(arr::Vector{Float64}; digits::Int=3)
-    rounded = round.(arr; digits=digits)
-    return bytes2hex(sha1(reinterpret(UInt8, rounded)))
-end
 
-function array_hash_key_efficient(arr::Vector{Float64}; digits::Int=3)
-    scale = 10.0^digits
-    int_arr = round.(Int64, arr .* scale)
-    key = mod(hash(int_arr), 10^8)
-    return key
-end
 
 # Helper function to compute c_spec
 compute_c_spec(V_spec, z_spec) = z_spec ./ V_spec
@@ -163,11 +162,12 @@ end
 function process_trial_point(c_trial::MVector, T_spec, V_spec, z_spec::MVector, model, digits, feasibility_check, c_spec::MVector)   
     α = -100.0
     c = c_trial    
-    try
+    # try
         c = stability(MVector(c_trial...); T_spec, V_spec, N_spec=z_spec, model)        
-    catch e        
-        return (status=:failed, error_message = e, c=nothing, D_trial=nothing, trivial=nothing, feasible=nothing, α =nothing)
-    end
+    # catch e        
+    #     @error "Newton failed: ", e
+    #     return (status=:failed, error_message = e, c=nothing, D_trial=nothing, trivial=nothing, feasible=nothing, α =nothing)
+    # end
     
     # @show "Processed trial point: $c with α = $α"
     # Compute D_trial and check solution properties
@@ -196,7 +196,7 @@ function VT_stabilityAnalysis(; T_spec, V_spec, z_spec::MVector, model)
 
     # Generate initial approximations and setup
     initial_approximations = generate_all_initial_approximations(T_spec, V_spec, z_spec, model)
-
+    # println("Generated $(size(initial_approximations, 1)) initial approximations for stability analysis.")
     feasibility_check = make_feasibility_check(model, 1e-8)
     DSinglePhase = Any[]
     isunstable = false
@@ -208,6 +208,7 @@ function VT_stabilityAnalysis(; T_spec, V_spec, z_spec::MVector, model)
     α = -100.0
     # Process each trial point
     for x in initial_approximations
+        # @show x
         c_trial = MVector(x[1:end]...)
         # N_trial = x[2:end]
         # V_trial = x[1]
@@ -216,17 +217,18 @@ function VT_stabilityAnalysis(; T_spec, V_spec, z_spec::MVector, model)
         trial_result = process_trial_point(c_trial, T_spec, V_spec, z_spec, model, digits, feasibility_check, MVector(c_spec...))        
         
         if trial_result.status == :failed
-            # println("Newton failed to converge for c_trial: $c_trial, T_spec = $T_spec, V_spec = $V_spec, N_spec = $z_spec with error: ", trial_result.error_message)
+            println("Newton failed to converge for c_trial: $c_trial, T_spec = $T_spec, V_spec = $V_spec, N_spec = $z_spec with error: ", trial_result.error_message)
             continue
         # Process converged results
         elseif trial_result.status == :converged
+            
             push!(DSinglePhase, trial_result.D_trial)
             c, D_trial = postprocess_solution(MVector(trial_result.c...), trial_result.D_trial)
             
             # Check for valid unstable solution
             if !trial_result.trivial && trial_result.feasible && D_trial >= 0
                 isunstable = true
-                
+                # println("c = $(trial_result.c), D_trial = $(trial_result.D_trial)")
                 push!(cs, c)
                 push!(Ds, D_trial)
                 push!(αs, trial_result.α)
@@ -296,7 +298,7 @@ function initialize_phase_stability(T_spec, Vspec, N0; model)
     ω = model.ω
     compute_K(T_spec, P_spec) = log.(P_c ./ P_spec) .+ (5.373 * (1 .+ ω) .* (1 .- T_c ./ T_spec))
     #### 1. Try to compute initial pressure from EoS (explicit or numerical)
-    try
+    # try
         P0 = EOS.press(T_spec, Vspec, N0; model=model)
         if P0 > 0
             # Use K-values at (T_spec, P0)
@@ -313,9 +315,9 @@ function initialize_phase_stability(T_spec, Vspec, N0; model)
             xL0 ./= ∑(xL0)
             push!(guesses, initialize_density_guess(T_spec, xL0, P0, :vapor; model))
         end
-    catch
-        @warn "Failed to compute P0 from EoS. Falling back to Wilson estimates."
-    end
+    # catch
+    #     @warn "Failed to compute P0 from EoS. Falling back to Wilson estimates."
+    # end
 
     #### 2. If P0 ≤ 0 or failed, use Wilson correlation
     # Wilson’s equation

@@ -85,11 +85,10 @@ function OptimizeHelmholtz(func, g, H, x, cons=nothing; tol=1e-6, maxiter=300, Î
     # g(x) = ForwardDiff.gradient(lagrangian, x)
     # H(x) = ForwardDiff.hessian(lagrangian, x)
    
-    # @show g(x)
-    # sol = nlsolve(func, x, xtol=tol, ftol=tol, iterations=2000, method=:trust_region)
+    # @show g(x)    
     # sol = nlsolve(g, H, x, xtol=tol, ftol=tol, iterations=4000, method=:newton, linesearch=LineSearches.BackTracking(order=3))
     # converged = sol.x_converged || sol.f_converged
-    @show tol
+    # @show tol
     sol, converged, iterations = Solvers.newton_mixed(func, g, H, x; tol=tol, maxiter)
     # @show sol
     # norm_converged = norm(g(sol.zero))
