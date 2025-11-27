@@ -94,7 +94,7 @@ function stability(c::MVector; T_spec, V_spec, N_spec::MVector, model)
     g(x) = ForwardDiff.jacobian(create_prob, x)
     H(x) = ForwardDiff.hessian(create_prob, x)
     x0 = MVector{length(c)}(log.(c))
-    x, converged, iters = Solvers.newton2(create_prob, g, H, x0; tol=1e-8, maxiter=50)
+    x, converged, iters = Solvers.newton_stability(create_prob, g, H, x0; tol=1e-8, maxiter=50)
     sol1 = exp.(x)
     
     # sol2 = nlsolve(create_prob, log.(c), xtol=1e-8, ftol=1e-8, method=:newton, linesearch=LineSearches.BackTracking(order=3))
@@ -132,8 +132,6 @@ end
 function is_approximately_equal(a, b; atol=1e-1)
     return length(a) == length(b) && all(abs.(a .- b) .< atol)
 end
-
-
 
 # Helper function to compute c_spec
 compute_c_spec(V_spec, z_spec) = z_spec ./ V_spec
@@ -175,7 +173,7 @@ function process_trial_point(c_trial::MVector, T_spec, V_spec, z_spec::MVector, 
     D_trial = VT_D(c; T_spec, V_spec, z_spec, model)
     trivial = is_trivial_solution(c, c_spec)
     feasible = feasibility_check(c)
-    return (;status=:converged, error_message = nothing, c, D_trial, α = -100.0, trivial, feasible)
+    return (; c, D_trial, α = -100.0, trivial, feasible)
 end
 
 # Post-process composition and D value
@@ -196,64 +194,41 @@ function VT_stabilityAnalysis(; T_spec, V_spec, z_spec::MVector, model)
 
     # Generate initial approximations and setup
     initial_approximations = generate_all_initial_approximations(T_spec, V_spec, z_spec, model)
-    # println("Generated $(size(initial_approximations, 1)) initial approximations for stability analysis.")
-    feasibility_check = make_feasibility_check(model, 1e-8)
-    DSinglePhase = Any[]
+    feasibility_check = make_feasibility_check(model, 1e-8)    
     isunstable = false
-    Ds = Any[]
-    cs = Any[]
-    αs = Any[]
+    
+    c_sol = c_spec    
+    bestD = -Inf    
     first_counter = -1
     counter = 1
-    α = -100.0
+    
     # Process each trial point
-    for x in initial_approximations
-        # @show x
+    for x in initial_approximations        
         c_trial = MVector(x[1:end]...)
-        # N_trial = x[2:end]
-        # V_trial = x[1]
-        # c_trial = N_trial ./ V_trial
-        # error("Processing trial point: $c_trial")
-        trial_result = process_trial_point(c_trial, T_spec, V_spec, z_spec, model, digits, feasibility_check, MVector(c_spec...))        
+        trial = process_trial_point(c_trial, T_spec, V_spec, z_spec, model, digits, feasibility_check, MVector(c_spec...))               
         
-        if trial_result.status == :failed
-            println("Newton failed to converge for c_trial: $c_trial, T_spec = $T_spec, V_spec = $V_spec, N_spec = $z_spec with error: ", trial_result.error_message)
-            continue
         # Process converged results
-        elseif trial_result.status == :converged
-            
-            push!(DSinglePhase, trial_result.D_trial)
-            c, D_trial = postprocess_solution(MVector(trial_result.c...), trial_result.D_trial)
-            
-            # Check for valid unstable solution
-            if !trial_result.trivial && trial_result.feasible && D_trial >= 0
-                isunstable = true
-                # println("c = $(trial_result.c), D_trial = $(trial_result.D_trial)")
-                push!(cs, c)
-                push!(Ds, D_trial)
-                push!(αs, trial_result.α)
-                first_counter == -1 && (first_counter = counter)
+        c_trial, D_trial = postprocess_solution(MVector(trial.c...), trial.D_trial)
+        
+        # Check for valid unstable solution
+        if !trial.trivial && trial.feasible && D_trial >= 0
+            isunstable = true
+ 
+            first_counter == -1 && (first_counter = counter)
+                        
+            if bestD < D_trial
+                bestD = D_trial
+                c_sol = c_trial    
             end
         end
+
         counter += 1
     end
 
-   
-    # Prepare results
-    result = if isunstable
-        bestD, idx = findmax(Ds)
-        c_sol = cs[idx]
-        α_sol = αs[idx]
-        (; T_trial=T_spec, D_trial=Ds[idx], isunstable, c_sol, c_spec, c=c_sol, 
-         bestD, cs, Ds, α_sol, DSinglePhase, cSinglePhase=Float64[], iterations=first_counter)
-    else
-        bestD = -Inf
-        (; T_trial=T_spec, D_trial=bestD, Ds, αs, α_sol = NaN, bestD, c_sol=nothing, c_spec, 
-         cs, cSinglePhase=Float64[], DSinglePhase, isunstable)
-    end
-
+    result = (; T_trial=T_spec, D_trial=bestD, isunstable, c_sol, c_spec, iterations=first_counter)
     
     return result
+    
 end
 
 

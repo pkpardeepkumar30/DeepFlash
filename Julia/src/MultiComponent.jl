@@ -17,10 +17,10 @@ include("CubicFuncs.jl")
 # include("PTFlash.jl")
 include("Flash.jl")
 include("Stability.jl")
-include("Sols.jl")
+include("PreFlash.jl")
 
 
 
-export Problems, EOS, CubicFuncs, Solvers, Flash, Stability, Scalers, Sols
+export Problems, EOS, CubicFuncs, Solvers, Flash, Stability, Scalers, PreFlash
 
 end

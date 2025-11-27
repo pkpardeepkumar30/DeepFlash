@@ -3,6 +3,7 @@ if false
     include("../src/Sols.jl")
     using .MultiComponent
 end
+
 # cd("Pipelines/scripts/")
 using Pkg
 Pkg.activate("./Julia/")
@@ -59,7 +60,7 @@ model_5_6 = MultiComponent.EOS.PengRobinson(; kwargs_56..., doScale = true);
 
 function run_flash_calculations(prob, model)
     p1 = prob().T
-    Sols.flash_calculation(p1.U, p1.V, MVector((p1.N)...); model)
+    PreFlash.flash_calculation(p1.U, p1.V, MVector((p1.N)...); model)
 end
 
 run_flash_calculations(Problems.prob_1, model_1_4)
@@ -68,6 +69,52 @@ run_flash_calculations(Problems.prob_3, model_1_4)
 run_flash_calculations(Problems.prob_4, model_1_4)
 run_flash_calculations(Problems.prob_5, model_5_6)
 run_flash_calculations(Problems.prob_6, model_5_6)
+
+function kernel!(N)
+    i = threadIdx().x
+    sv = N[i]        # Fetch SVector from CuArray
+    val = sv[1]      # Access element safely on GPU
+    # N[i] = Base.setindex(sv, val + 1.0, 1)
+    for k in 1:7
+        val = @inbounds N[i][k]
+        @cuprint( val, " ")
+    end
+    
+    nothing
+end
+
+@cuda threads=10 kernel!(N_d)
+
+function flash_kernel(U_d, V_d, N_d, results)
+    # global thread id
+    gid = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    
+    # bounds check
+    if gid > length(U_d)
+        return
+    end
+
+    U_spec = @inbounds U_d[gid]   # scalar Float64
+    V_spec = @inbounds V_d[gid]   # scalar Float64
+    N_spec = @inbounds N_d[gid]    # returns SVector{Nc,Float64}
+    # Now thread gid works on the gid-th UVN spec
+
+    @inbounds results[gid] = Sols.solve_UVFlash_QFuncVer3(U_spec, V_spec, N_spec; model=model_1_4)
+end
+
+Nbatch = 10000
+Nc = 6
+
+# CPU-side data
+U_cpu = rand(Float64, Nbatch)
+V_cpu = rand(Float64, Nbatch)
+
+# N is an array of Static Vectors
+N_cpu = [@SVector rand(Nc) for i in 1:Nbatch]
+
+U_d = CuArray(U_cpu)              # CuArray{Float64,1}
+V_d = CuArray(V_cpu)              # CuArray{Float64,1}
+N_d = CuArray(N_cpu)              # CuArray{SVector{Nc,Float64},1}
 
 using CUDA
 CUDA.versioninfo()

@@ -1,4 +1,4 @@
-module Sols
+module PreFlash
 using Dates
 using ..Scalers
 using ..EOS
@@ -118,7 +118,7 @@ function flash_trivial_solution(α; tol=1e-8)
 end
 
 function attempt_two_phase_flash(initial_guess, U_spec, V_spec, N_spec, model,
-                                 Scale, T_stab, S_one, numPhases, useNewtonJulia=nothing)
+                                 Scale, T_stab, S_one, numPhases)
     ρ_mix = sum(N_spec .* model.Mw) / V_spec
     cons(_) = nothing  # Dummy constraint function
     
@@ -137,29 +137,141 @@ function attempt_two_phase_flash(initial_guess, U_spec, V_spec, N_spec, model,
         V_total=V_spec, 
         N_total=N_spec
     )
-    # @show H(res)
-    # @show extra_info
-    # @show iterations
+   
     if !flash_converged 
-        return false, nothing  # Flash did not converge
+        return false, vcat(N_spec, V_spec, T_stab)  # Flash did not converge
     end
     T, α, V_G, N_G, V_L, N_L = extract_phase_properties(res, V_spec, N_spec, model, ρ_mix)
     
     U_G = EOS.U_EOS(T, V_G, N_G; model)
     U_L = EOS.U_EOS(T, V_L, N_L; model)
-    # @show  α
+    
     is_trivial = flash_trivial_solution(α) 
-    # is_all_liq_trivial = flash_trivial_solution(α) 
-    # is_trivial = is_all_gas_trivial || is_all_liq_trivial
-    # @info "Trivial: $is_trivial, α = $α"
-    # @info "User GuessFlash: $res, converged: $flash_converged, Trivial: $is_trivial, α = $α"
-    # @info "Flash: $res, converged: $flash_converged, Trivial: $is_trivial, α = $α"
     is_valid = is_valid_two_phase(T, α, V_G, N_G, V_L, N_L, N_spec, V_spec, model, S_one)
-    # @info "Is two phase trivial solution: $is_trivial, is valid: $is_valid"
+
     if is_valid && !is_trivial
         return true, vcat(N_G, V_G, T)
     end
-    return false, nothing
+    return false, vcat(N_G, V_G, T)
+end
+
+function stability_analysis_fallback(U_spec, V_spec, N_spec, model, T_stab, S_one, 
+                                     Scale, numPhases)
+                                     
+    stab = Stability.VT_stabilityAnalysis(; model, T_spec=T_stab, V_spec, z_spec=N_spec)
+    # initial_approximations = Stability.generate_all_initial_approximations(T_stab, V_spec, N_spec, model)
+    # N_G = initial_approximations[1][2:end]
+    # V_G = initial_approximations[1][1]
+    
+    is_uncertain = abs(stab.D_trial) ≤ 1e-4  
+    # @info "Stability analysis result: D = $(stab.bestD), is_uncertain = $is_uncertain, stab.isunstable = $(stab.isunstable), T_stab = $T_stab K"
+    if !stab.isunstable
+        is_good_single_phase = is_physically_valid_single_phase(T_stab; T_upper_limit = 600)
+        if is_good_single_phase
+            # @info "Single-phase solution is valid, returning it directly."
+            return true, vcat(N_spec, V_spec, T_stab)
+        else
+            @warn "Single-phase solution is not valid, trying stability-based initialization."
+            # T_stab = 300.0  # Default temperature
+            return false, vcat(N_spec, V_spec, T_stab)
+        end
+    end
+    x0 = Stability.IG3(stab.c_sol, T_stab, U_spec, V_spec, N_spec; model, verbose=false)    
+    ρ_mix = sum(N_spec .* model.Mw) / V_spec
+    # @show x0    
+    # Extract and validate stability-based initial guess
+    N_G = x0[1:model.Nc]
+    V_G = x0[model.Nc+1]
+    if !(all( 0 .≤ N_G .≤ N_spec)) || !(0 < V_G < V_spec)
+        return false, vcat(N_spec, V_spec, T_stab)
+    end
+    
+    # Compute initial vapor fraction
+    N_L = N_spec .- N_G
+    V_L = V_spec - V_G
+    ρG = N_G .* model.Mw ./ V_G
+    ρL = N_L .* model.Mw ./ V_L
+
+    ϵ = 1e-12  # Small value to avoid division by zero
+
+    denominator = abs(ρL[1] - ρG[1]) < ϵ ? ϵ : ρL[1] - ρG[1]
+
+    # total mixture density of the first component
+    ρ_1= N_spec[1] * model.Mw[1] / V_spec
+    
+    α_est = (ρL[1] - ρ_1) / denominator
+    α_est = clamp(α_est, 1e-8, 1-1e-8)  # Avoid extreme values
+    
+    x_init = vcat(ρG ./ ρ_mix, α_est, T_stab)
+    if sum(ρG) < 1e-8
+        @warn "Vapor density is too low."
+    end
+    if sum(ρG) > 1000
+        @warn "Vapor density is too high."        
+    end
+    
+    # Attempt flash with stability-based guess
+    success, result = attempt_two_phase_flash(
+        x_init, U_spec, V_spec, N_spec, model, Scale, 
+        T_stab, S_one, numPhases
+    )
+    success && return true, result
+    
+    return false, vcat(N_spec, V_spec, T_stab)
+end
+
+function solve_rho_Q_from_UVN(U_spec, V_spec, N_spec::MVector; model, singlePhaseSure=false, 
+                              ϵ=0.0, x_guess=nothing, numPhases=2)
+
+    T_stab = compute_single_phase_state(U_spec, V_spec, N_spec, model)
+    
+    if singlePhaseSure
+        # If single-phase solution is guaranteed, return it directly
+        status = is_physically_valid_single_phase(T_stab)        
+        result = (status = status, flash_result = vcat(N_spec, V_spec, T_stab))
+        return result
+    end
+    S_one = EOS.S_EOS(T_stab, V_spec, N_spec; model)
+    ρ_mix = sum(N_spec .* model.Mw) / V_spec
+    Scale = vcat(N_spec, V_spec, model.T_c)
+    
+    # First attempt: Use provided initial guess if available
+    if x_guess !== nothing
+        # try
+            success, flash_result = attempt_two_phase_flash(
+            x_guess, U_spec, V_spec, N_spec, model, Scale, 
+            T_stab, S_one, numPhases)
+
+        if success
+            @info "Flash with Initial guess succeeded"
+            result = (status = success, flash_result = flash_result)
+            return result
+        end
+        # catch
+        #     @warn "Poor initial guess provided; proceeding with stability analysis."
+        # end
+        
+    end
+    
+    # Second attempt: Stability-based initialization
+    success, flash_result = stability_analysis_fallback(
+        U_spec, V_spec, N_spec, model, T_stab, S_one, 
+        Scale, numPhases
+    )
+    
+    result = (success = success, flash_result = flash_result)
+    
+    return result   
+    
+end
+
+# High-level flash calculation interface
+function flash_calculation(U_spec, V_spec, N_spec::MVector; digits::Int=3, atol::Float64=1e-8,
+    model, singlePhaseSure=false, x_guess=nothing)
+    
+    status, flash_result = solve_rho_Q_from_UVN(U_spec, V_spec, N_spec; model, singlePhaseSure, x_guess)
+    return (status, flash_result)
+    
 end
 
 function func_uvn(x; TVN_sol,  model)
@@ -177,7 +289,7 @@ function solve_UVFlash_QFuncVer3(U_spec, V_spec, N_spec; initial_guess = nothing
     if isnothing(initial_guess)
         # @info "No initial guess provided, computing stability-based initialization."
         
-        stab = Stability.VT_stabilityAnalysis(; model, T_spec=T_stab, V_spec, z_spec=N_spec, stability_cache = nothing)
+        stab = Stability.VT_stabilityAnalysis(; model, T_spec=T_stab, V_spec, z_spec=N_spec)
         if !stab.isunstable
             is_good_single_phase = is_physically_valid_single_phase(T_stab)
             if is_good_single_phase
@@ -283,7 +395,7 @@ function solve_UVFlash_QFuncVer2(U_spec, V_spec, N_spec; initial_guess = nothing
     if isnothing(initial_guess)
         # @info "No initial guess provided, computing stability-based initialization."
         
-        stab = Stability.VT_stabilityAnalysis(; model, T_spec=T_stab, V_spec, z_spec=N_spec, stability_cache = nothing)
+        stab = Stability.VT_stabilityAnalysis(; model, T_spec=T_stab, V_spec, z_spec=N_spec)
         if !stab.isunstable
             is_good_single_phase = is_physically_valid_single_phase(T_stab)
             if is_good_single_phase
@@ -342,142 +454,5 @@ function solve_UVFlash_QFuncVer2(U_spec, V_spec, N_spec; initial_guess = nothing
     end
 
 end
-
-function stability_analysis_fallback(U_spec, V_spec, N_spec, model, T_stab, S_one, 
-                                     Scale, numPhases, useNewtonJulia, stability_cache)
-                                     
-    stab = Stability.VT_stabilityAnalysis(; model, T_spec=T_stab, V_spec, z_spec=N_spec)
-    # initial_approximations = Stability.generate_all_initial_approximations(T_stab, V_spec, N_spec, model)
-    # N_G = initial_approximations[1][2:end]
-    # V_G = initial_approximations[1][1]
-    
-    is_uncertain = abs(stab.bestD) ≤ 1e-4  
-    # @info "Stability analysis result: D = $(stab.bestD), is_uncertain = $is_uncertain, stab.isunstable = $(stab.isunstable), T_stab = $T_stab K"
-    if !stab.isunstable
-        is_good_single_phase = is_physically_valid_single_phase(T_stab; T_upper_limit = 600)
-        if is_good_single_phase
-            # @info "Single-phase solution is valid, returning it directly."
-            return true, vcat(N_spec, V_spec, T_stab)
-        else
-            @warn "Single-phase solution is not valid, trying stability-based initialization."
-            # T_stab = 300.0  # Default temperature
-            return false, vcat(N_spec, V_spec, T_stab)
-        end
-    end
-    x0 = Stability.IG3(stab.c, T_stab, U_spec, V_spec, N_spec; model, verbose=false)    
-    ρ_mix = sum(N_spec .* model.Mw) / V_spec
-    # @show x0    
-    # Extract and validate stability-based initial guess
-    N_G = x0[1:model.Nc]
-    V_G = x0[model.Nc+1]
-    if !(all( 0 .≤ N_G .≤ N_spec)) || !(0 < V_G < V_spec)
-        return false, nothing
-    end
-    
-    # Compute initial vapor fraction
-    N_L = N_spec .- N_G
-    V_L = V_spec - V_G
-    ρG = N_G .* model.Mw ./ V_G
-    ρL = N_L .* model.Mw ./ V_L
-
-    ϵ = 1e-12  # Small value to avoid division by zero
-
-    denominator = abs(ρL[1] - ρG[1]) < ϵ ? ϵ : ρL[1] - ρG[1]
-
-    # total mixture density of the first component
-    ρ_1= N_spec[1] * model.Mw[1] / V_spec
-    
-    α_est = (ρL[1] - ρ_1) / denominator
-    α_est = clamp(α_est, 1e-8, 1-1e-8)  # Avoid extreme values
-    
-    x_init = vcat(ρG ./ ρ_mix, α_est, T_stab)
-    if sum(ρG) < 1e-8
-        @warn "Vapor density is too low."
-    end
-    if sum(ρG) > 1000
-        @warn "Vapor density is too high."        
-    end
-    
-    # Attempt flash with stability-based guess
-    success, result = attempt_two_phase_flash(
-        x_init, U_spec, V_spec, N_spec, model, Scale, 
-        T_stab, S_one, numPhases, useNewtonJulia
-    )
-    success && return true, result
-    
-    return false, nothing
-end
-
-function solve_rho_Q_from_UVN(U_spec, V_spec, N_spec::MVector; model, singlePhaseSure=false, 
-                              ϵ=0.0, x_guess=nothing, useNewtonJulia=true, factor=1.0, numPhases=2, stability_cache=nothing)
-    # @show U_spec, V_spec, N_spec
-    # Compute single-phase reference state
-
-    T_stab = compute_single_phase_state(U_spec, V_spec, N_spec, model)
-    
-    if singlePhaseSure
-        # If single-phase solution is guaranteed, return it directly
-        is_good_single_phase = is_physically_valid_single_phase(T_stab)
-        status = is_good_single_phase ? :success : :failed
-        result = (status = status, flash_result = vcat(N_spec, V_spec, T_stab))
-        # use_cache && store_uvn_flash_result(stability_cache, U_spec, V_spec, N_spec, result)
-        return result
-    end
-    S_one = EOS.S_EOS(T_stab, V_spec, N_spec; model)
-    ρ_mix = sum(N_spec .* model.Mw) / V_spec
-    Scale = vcat(N_spec, V_spec, model.T_c)
-    
-    # First attempt: Use provided initial guess if available
-    if x_guess !== nothing
-        try
-            success, flash_result = attempt_two_phase_flash(
-            x_guess, U_spec, V_spec, N_spec, model, Scale, 
-            T_stab, S_one, numPhases, useNewtonJulia)
-
-        if success
-            @info "Flash with Initial guess succeeded"
-            result = (status = :success, flash_result = flash_result)
-            # use_cache && store_uvn_flash_result(stability_cache, U_spec, V_spec, N_spec, result)
-            return result
-        else
-            # @warn "Initial guess failed; proceeding with stability analysis for cell $(stability_cache.cell_index[1]) at iteration $(stability_cache.it[1]) "
-        end
-        catch
-            @warn "Poor initial guess provided; proceeding with stability analysis."
-        end
-        
-    end
-    
-    # Second attempt: Stability-based initialization
-    success, flash_result = stability_analysis_fallback(
-        U_spec, V_spec, N_spec, model, T_stab, S_one, 
-        Scale, numPhases, useNewtonJulia, stability_cache
-    )
-    if success
-        result = (status = :success, flash_result = flash_result)
-        # use_cache && store_uvn_flash_result(stability_cache, U_spec, V_spec, N_spec, result)
-        return result
-    end
-    
-    return (status = :failed, flash_result = vcat(N_spec, V_spec, T_stab))  # No valid solution found
-
-    # Fallback: Single-phase solution
-    # is_good_single_phase = is_physically_valid_single_phase(T_stab)
-    # status = is_good_single_phase ? :success : :failed
-    # result_single_phase = (status = status, flash_result = vcat(N_spec, V_spec, T_stab))
-    # use_cache && store_uvn_flash_result(stability_cache, U_spec, V_spec, N_spec, result_single_phase)
-    # return result_single_phase
-end
-
-
-# High-level flash calculation interface
-function flash_calculation(U_spec, V_spec, N_spec::MVector; digits::Int=3, atol::Float64=1e-8,
-    model, singlePhaseSure=false, x_guess=nothing, stability_cache = nothing)
-    
-    status, flash_result = solve_rho_Q_from_UVN(U_spec, V_spec, N_spec; model, singlePhaseSure, x_guess, stability_cache)
-    return (status, flash_result)
-    
-end
-
 
 end

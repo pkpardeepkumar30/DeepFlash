@@ -124,7 +124,7 @@ function backtracking_linesearch(f, x, fx, J, Δx; c=1e-4, β=0.5, max_ls=10)
     return α
 end
 
-function newton2(f, grad_f, hess_f, x0; tol=1e-8, maxiter=100, c=1e-4, β=0.5)
+function newton_stability(f, grad_f, hess_f, x0; tol=1e-8, maxiter=100, c=1e-4, β=0.5)
     
     x = copy(x0)
     α = 1.0
@@ -150,44 +150,6 @@ function newton2(f, grad_f, hess_f, x0; tol=1e-8, maxiter=100, c=1e-4, β=0.5)
     return x, false, maxiter
 end
 
-function newton(f, grad_f, hess_f, x0; tol=1e-8, maxiter=100, 
-                c1=1e-4, beta=0.5)
-
-    x = copy(x0)
-    
-    for iter = 1:maxiter
-        g = grad_f(x)
-        H = hess_f(x)
-
-        # Regularized Hessian (GPU-friendly, avoids singularity)
-        Δx = -(H + 1e-12*I) \ g
-
-        # --- Armijo backtracking line search ---
-        α = 1.0
-        f_x = f(x)
-        g_dot_dx = dot(g, Δx)
-
-        # decrease condition: f(x + αΔx) ≤ f(x) + c1 α gᵀΔx
-        while f(x .+ α .* Δx) > f_x + c1 * α * g_dot_dx
-            α *= beta                      # reduce step size
-            if α < 1e-8                    # safeguard
-                break
-            end
-        end
-
-        # update
-        x_new = x .+ α .* Δx
-
-        # convergence check
-        if norm(x_new - x, Inf) < tol && norm(g, Inf) < tol
-            return x_new, true, iter
-        end
-
-        x = x_new
-    end
-
-    return x, false, maxiter
-end
 
 # function check_convergence(x, Δx, g; tol)
 #     step_tol = maximum(abs.(Δx) ./ max.(abs.(x), 1.0))
@@ -212,7 +174,7 @@ function newton_mixed(f, g, H, x0; tol=1e-8, maxiter=100)
         hess_fx = CuArray(H(Array(x)))
 
         # Solve Newton step on GPU
-        Δx = -(hess_fx \ grad_fx)
+        Δx = -(hess_fx + 1e-10*I) \ grad_fx
 
         x .+= Δx
         x_cpu  = Array(x)
