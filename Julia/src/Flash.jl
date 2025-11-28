@@ -90,7 +90,7 @@ function OptimizeHelmholtz(func, g, H, x, cons=nothing; tol=1e-6, maxiter=300, Î
     # converged = sol.x_converged || sol.f_converged
     # @show tol
     sol, converged, iterations = Solvers.newton_mixed(func, g, H, x; tol=tol, maxiter)
-    # @show sol
+    @show x, sol, iterations, tol
     # norm_converged = norm(g(sol.zero))
     # @show sol.iterations sol.x_converged, sol.f_converged, norm_converged
     if !converged        

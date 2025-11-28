@@ -13,7 +13,7 @@ using ..Solvers
 using Random
 using FixedPointAcceleration
 using SHA
-
+using CUDA
 using Distributions
 
 function sample_simplex(d::Int, n::Int; α_low=0.1, α_high=10.0, rng::AbstractRNG=Random.GLOBAL_RNG)
@@ -102,31 +102,89 @@ function stability(c::MVector; T_spec, V_spec, N_spec::MVector, model)
     # sol.zero
 end
 
-
-function generate_perturbed_guesses(c_spec, k; T_spec, model, noise_level=0.1)
+function generate_perturbed_guesses2(c_spec, k; T_spec, model, noise_level=0.1)
     n = length(c_spec)
     guesses = []
-    for _ in 1:k
+    noise_cpu = noise_level * randn(n, k)
+    for idx in 1:k
         # Add random Gaussian noise and ensure positivity
         
         # Normalize to preserve total concentration (L∞ stable)
         # c_norm = c * (sum(c_spec) / sum(c))
-        c_perturbed = max.(c_spec .* (1 .+ noise_level * randn(n)), 1e-12)
-        c_perturbed = c_perturbed * (sum(c_spec) / sum(c_perturbed))
+        # noise[i, idx]
+        for i in 1:n
+            # Add random Gaussian noise and ensure positivity
+            perturbed_val = c_spec[i] * (1.0 + noise_cpu[i, idx])
+            perturbed_val = max(perturbed_val, 1e-12)
+            c_perturbed[i] = perturbed_val
+        end
+        # c_perturbed = max.(c_spec .* (1 .+ noise_level * randn(n)), 1e-12)
+        # c_perturbed = c_perturbed * (sum(c_spec) / sum(c_perturbed))
         push!(guesses, c_perturbed)
         c_perturbed = c_perturbed ./ sum(c_perturbed)
-        U_trial = U_EOS(T_spec, 1.0, c_perturbed; model)
-        # push!(guesses, vcat(c_perturbed, U_trial))
         push!(guesses, c_perturbed)
     end
 
     return guesses
 end
 
-function is_trivial_solution(c, c_spec; tol=1e-4)
-    rel_error = norm(c .- c_spec, Inf) / norm(c_spec, Inf)
-    return rel_error < tol
+function generate_perturbed_guesses_orig(c_spec, k; T_spec, model, noise_level=0.1)
+    n = length(c_spec)
+    guesses = []
+    # noise_cpu = noise_level * randn(n, k)
+    for _ in 1:k
+        # Add random Gaussian noise and ensure positivity
+        
+        # Normalize to preserve total concentration (L∞ stable)
+        # c_norm = c * (sum(c_spec) / sum(c))
+        # noise[i, idx]        
+        c_perturbed = max.(c_spec .* (1 .+ noise_level * randn(n)), 1e-12)
+        c_perturbed = c_perturbed * (sum(c_spec) / sum(c_perturbed))
+        push!(guesses, c_perturbed)
+        c_perturbed = c_perturbed ./ sum(c_perturbed)
+        push!(guesses, c_perturbed)
+    end
+
+    return guesses
 end
+
+function generate_perturbed_guesses(c_spec, k; T_spec, model, noise_level=0.1, rng_seed=nothing)
+    n = length(c_spec)
+    guesses = Vector{Vector{Float64}}()
+    
+    # Pre-generate Gaussian noise: each column is a noise vector
+    if rng_seed !== nothing
+        Random.seed!(rng_seed)
+    end
+    noise_cpu = noise_level .* randn(n, k)
+    # @show noise_cpu
+    for j in 1:k
+        # Get precomputed noise for this sample
+        δ = @view noise_cpu[:, j]
+
+        # Apply noise: c_spec .* (1 .+ δ)
+        c_perturbed = similar(c_spec)
+        @inbounds for i in 1:n
+            c_perturbed[i] = max(c_spec[i] * (1 + δ[i]), 1e-12)
+        end
+
+        # Normalize to preserve total concentration
+        scale = sum(c_spec) / sum(c_perturbed)
+        @inbounds for i in 1:n
+            c_perturbed[i] *= scale
+        end
+
+        push!(guesses, copy(c_perturbed))
+
+        # Normalize to sum = 1 version
+        s = sum(c_perturbed)
+        c_norm = (1/s) .* c_perturbed
+        push!(guesses, c_norm)
+    end
+
+    return guesses
+end
+
 
 
 function is_approximately_equal(a, b; atol=1e-1)
@@ -137,31 +195,38 @@ end
 compute_c_spec(V_spec, z_spec) = z_spec ./ V_spec
 
 # Generate all initial approximations
-function generate_all_initial_approximations(T_spec, V_spec, z_spec, model)
+function generate_all_initial_approximations(T_spec, V_spec, z_spec, model, rng_seed=nothing)
     c_spec = compute_c_spec(V_spec, z_spec)
       
     simplex = generate_smejkal_simplex_based_approximations(; T_spec, model)    
     saturation = initialize_phase_stability(T_spec, V_spec, z_spec; model)
-    perturbed = generate_perturbed_guesses(c_spec, 10; T_spec, model, noise_level=0.1)
-    # @show perturbed
+    perturbed = generate_perturbed_guesses(c_spec, 10; T_spec, model, noise_level=0.1, rng_seed)
+    
     # error("Initial approximations should be a matrix with each column as a point in the simplex")
     return vcat(simplex, saturation, perturbed)
 end
 
 
+
+function is_trivial_solution(c, c_spec; tol=1e-4)
+    rel_error = norm(c .- c_spec, Inf) / norm(c_spec, Inf)
+    return rel_error < tol
+end
+
 # Create feasibility check function
 function make_feasibility_check(model, ϵ=0.0)
     n = model.Nc
     bi = [b_i(; i=i, model) for i in 1:n]
-    return x -> sum(bi .* x) <= 1.0 && all(x .>= ϵ)
+    return x -> sum(bi .* x) <= 1.0 && all(x .>= ϵ) && !any(isnan.(x))
 end
 
 
-function process_trial_point(c_trial::MVector, T_spec, V_spec, z_spec::MVector, model, digits, feasibility_check, c_spec::MVector)   
+
+function process_trial_point(c::MVector, T_spec, V_spec, z_spec::MVector, model, digits, feasibility_check, c_spec::MVector)   
     α = -100.0
-    c = c_trial    
+    # c = c_trial    
     # try
-        c = stability(MVector(c_trial...); T_spec, V_spec, N_spec=z_spec, model)        
+        c_trial = stability(MVector(c...); T_spec, V_spec, N_spec=z_spec, model)        
     # catch e        
     #     @error "Newton failed: ", e
     #     return (status=:failed, error_message = e, c=nothing, D_trial=nothing, trivial=nothing, feasible=nothing, α =nothing)
@@ -169,21 +234,23 @@ function process_trial_point(c_trial::MVector, T_spec, V_spec, z_spec::MVector, 
     
     # @show "Processed trial point: $c with α = $α"
     # Compute D_trial and check solution properties
-    U_trial = U_EOS(T_spec, 1.0, c; model)
-    D_trial = VT_D(c; T_spec, V_spec, z_spec, model)
-    trivial = is_trivial_solution(c, c_spec)
-    feasible = feasibility_check(c)
-    return (; c, D_trial, α = -100.0, trivial, feasible)
+    U_trial = U_EOS(T_spec, 1.0, c_trial; model)
+    D_trial = VT_D(c_trial; T_spec, V_spec, z_spec, model)
+    
+    trivial = is_trivial_solution(c_trial, c_spec)
+    feasible = feasibility_check(c_trial)
+    # @info "D_trial = $D_trial for composition $c_trial, trivial=$trivial, feasible=$feasible"
+    return (; c=c_trial, D_trial, α = -100.0, trivial, feasible)
 end
 
 # Post-process composition and D value
 function postprocess_solution(c::MVector, D_trial)
     return c, D_trial
     
-    n = length(c)
-    c_processed = [abs(comp) < 1e-4 ? eps(comp) : comp for comp in c]
-    D_processed = D_trial < 0 && abs(D_trial) < 1e-4 ? eps(abs(D_trial)) : D_trial
-    return c_processed, D_processed
+    # n = length(c)
+    # c_processed = [abs(comp) < 1e-4 ? eps(comp) : comp for comp in c]
+    # D_processed = D_trial < 0 && abs(D_trial) < 1e-4 ? eps(abs(D_trial)) : D_trial
+    # return c_processed, D_processed
 end
 
 # Main stability analysis function
@@ -208,17 +275,17 @@ function VT_stabilityAnalysis(; T_spec, V_spec, z_spec::MVector, model)
         trial = process_trial_point(c_trial, T_spec, V_spec, z_spec, model, digits, feasibility_check, MVector(c_spec...))               
         
         # Process converged results
-        c_trial, D_trial = postprocess_solution(MVector(trial.c...), trial.D_trial)
-        
+        # c_trial, D_trial = postprocess_solution(MVector(trial.c...), trial.D_trial)
+        D_trial = trial.D_trial
         # Check for valid unstable solution
-        if !trial.trivial && trial.feasible && D_trial >= 0
+        if !isnan(D_trial) && !trial.trivial && trial.feasible && D_trial >= 0 
             isunstable = true
- 
+            # @info "Valid unstable solution found: c_trial = $c_trial, D_trial = $D_trial"
             first_counter == -1 && (first_counter = counter)
                         
             if bestD < D_trial
                 bestD = D_trial
-                c_sol = c_trial    
+                c_sol = trial.c
             end
         end
 
@@ -504,9 +571,11 @@ function coverSimplex(; model)
         X[i] = 0.5 * (V[i-1] .+ barycenter)
         
     end
-    
+    @show X
     return X
 end
+
+
 
 # TODO
 function generate_smejkal_simplex_based_approximations2(;T_spec, model)
@@ -567,28 +636,24 @@ function generate_smejkal_simplex_based_approximations(; T_spec, model)
 
         for i in 1:numTemps
             T_trial = temperature_range[i]
-
             # Unnormalized trial
-            # u_unnorm = U_EOS(T_trial, 1.0, c_trial_raw; model)
-            # trial_unnorm = vcat(c_trial_raw, u_unnorm)
             trial_unnorm = vcat(c_trial_raw)
-            # extract_qty(qty) = ForwardDiff.value.(ForwardDiff.value.(qty))
-            # @show typeof(trial_unnorm) typeof(initial_approximations)
             initial_approximations[counter] = trial_unnorm
             counter += 1
 
             # Normalized trial
-            u_norm = U_EOS(T_trial, 1.0, c_trial_norm; model)
+            # u_norm = U_EOS(T_trial, 1.0, c_trial_norm; model)
             # trial_norm = vcat(c_trial_norm, u_norm)
             trial_norm = vcat(c_trial_norm)
             initial_approximations[counter] = trial_norm
+            
             counter += 1
         end
     end
-
+    
+    
     return initial_approximations
 end
-
 
 # x is vector of convcentrations, c_i = N_i / V, V is the volume of the phase p
 function D(x; U_spec, V_spec, z_spec, model)
@@ -643,6 +708,7 @@ function VT_D(x; T_spec, V_spec, z_spec, model)
 
     return result
 end
+
 
 @exportAll
 

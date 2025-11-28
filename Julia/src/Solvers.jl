@@ -146,7 +146,7 @@ function newton_stability(f, grad_f, hess_f, x0; tol=1e-8, maxiter=100, c=1e-4, 
         x .+= α * Δx
     end
 
-    println("Max iterations reached without convergence.")
+    # println("Max iterations reached without convergence.")
     return x, false, maxiter
 end
 

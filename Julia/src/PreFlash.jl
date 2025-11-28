@@ -8,7 +8,7 @@ using Random
 using StaticArrays
 using ForwardDiff
 using LinearAlgebra
-using SHA
+# using SHA
 
 function ThermoProperty(func, prob, sol, model; digits=6)
     V_spec, N_spec = prob.T.V, prob.T.N
@@ -224,7 +224,6 @@ function solve_rho_Q_from_UVN(U_spec, V_spec, N_spec::MVector; model, singlePhas
                               ϵ=0.0, x_guess=nothing, numPhases=2)
 
     T_stab = compute_single_phase_state(U_spec, V_spec, N_spec, model)
-    
     if singlePhaseSure
         # If single-phase solution is guaranteed, return it directly
         status = is_physically_valid_single_phase(T_stab)        
