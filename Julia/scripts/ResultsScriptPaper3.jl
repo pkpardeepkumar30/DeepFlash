@@ -1,6 +1,7 @@
 if false
     include("../src/MultiComponent.jl")
-    include("../src/Sols.jl")
+    include("../src/PreFlashGPU.jl")
+    include("../src/PreFlash.jl")
     using .MultiComponent
 end
 
@@ -19,6 +20,9 @@ using Printf
 using Statistics
 using CUDA
 using Random
+using InteractiveUtils   # for code_typed
+using Cthulhu # for introspection
+
 kwargs_1_4 = (;
     Mw = [16.04e-3, 34.083e-3],
     T_c = [190.4, 373.2],  # Critical temperatures in K
@@ -610,6 +614,210 @@ function test_flash_calculation_gpu(prob; model)
     end
 end
 
+using CUDA
+using InteractiveUtils   # for code_typed, methods, which
+using Logging
+# optional: using Cthulhu
+
+"""
+gpu_inspect_run(f, args...; rethrow_err=true)
+
+Runs `f(args...)` (synchronized). On error it:
+ - prints the exception and backtrace
+ - prints a summary of every argument (typeof, eltype if array, size if array)
+ - detects whether any argument or nested field contains a Dual-like type
+ - prints the selected method (which) and methods(f)
+ - attempts `code_typed(f, Tuple{...})` (without `interactive=true` to avoid the MethodError)
+ - gives guidance for GPU vs CPU AD issues
+"""
+function gpu_inspect_run(f, args...; rethrow_err::Bool=true)
+    try
+        CUDA.@sync f(args...)
+        return :ok
+    catch err
+        bt = catch_backtrace()
+        @error "Caught exception" exception = err
+
+        println("\n--- Exception ---")
+        showerror(stderr, err)
+        println("\n--- Backtrace (most recent call last) ---")
+        Base.show_backtrace(stderr, bt)
+        println("--- End backtrace ---\n")
+
+        # Helper to detect if a value or element contains a Dual type (heuristic)
+        function contains_dual(x)
+            # quick check for concrete Dual types:
+            t = typeof(x)
+            # Heuristic: name contains "Dual" (adjust to your module's Dual type)
+            if occursin("Dual", string(t))
+                return true
+            end
+            # If array or container, check element type if possible
+            try
+                el = eltype(x)
+                if occursin("Dual", string(el))
+                    return true
+                end
+            catch
+                # eltype may fail for scalars or custom types
+            end
+            # If iterable and not string, check some elements (avoid huge scans)
+            try
+                if isa(x, AbstractArray)
+                    # check first few elements
+                    for i in 1:min(length(x), 8)
+                        if contains_dual(x[i])
+                            return true
+                        end
+                    end
+                end
+            catch
+                # ignore indexing errors
+            end
+            return false
+        end
+
+        # Print argument summaries
+        println("=== Argument summaries ===")
+        for (i, a) in enumerate(args)
+            typ = typeof(a)
+            s = "arg $i: typeof = $typ"
+            try
+                if isa(a, AbstractArray)
+                    s *= ", eltype = $(eltype(a)), size = $(size(a))"
+                end
+            catch _; end
+            s *= ", contains_dual = $(contains_dual(a))"
+            println(s)
+        end
+        println("=== End summaries ===\n")
+
+        # Show which method would be called
+        argtypes = Tuple(map(typeof, args))
+        println("=== Selected method info ===")
+        try
+            m = which(f, argtypes)
+            println("which(...) => ", m)
+        catch inner
+            @warn "which(...) failed" exception = inner
+        end
+        println("Available methods for the function:")
+        try
+            display(methods(f))
+        catch
+            # ignore
+        end
+        println("=== End method info ===\n")
+
+        # Try code_typed for the specific signature (do NOT pass `interactive=true` here)
+        println("=== Attempting code_typed(f, Tuple{...}) ===")
+        try
+            code_typed(f, argtypes)  # note: interactive kw sometimes unsupported for exceptions
+        catch inner
+            @warn "code_typed failed for this signature" exception = inner
+            println("Hint: try running the above `code_typed` manually with the concrete types in REPL.")
+        end
+        println("=== End code_typed attempt ===\n")
+
+        # Helpful hints for this specific error
+        println("=== Quick diagnosis tips ===")
+        println("- The error indicates a `Dual{Float32}` ended up on the GPU.")
+        println("- Common causes:")
+        println("  1) You used a CPU AD library (e.g., ForwardDiff.Dual) that is not GPU-compatible.")
+        println("  2) A broadcast or operation created a Dual on the device (mixing CPU Duals and CuArrays).")
+        println("  3) A function returns Duals for scalar ops and you broadcasted it over a CuArray.")
+        println("- Fixes to consider:")
+        println("  • Move AD to CPU: compute Duals / derivatives on CPU and only push plain Float arrays to GPU.")
+        println("  • Use a GPU-capable AD tool / make your Dual type isbits and GPU-friendly (non-trivial).")
+        println("  • Avoid broadcasting functions that produce Duals directly on CuArrays; instead map on CPU.")
+        println("  • Check all `.eltype` of your CuArrays and CPU arrays before the call.")
+        println("  • Insert explicit conversions: `Float32.(x)` or `CUDA.unsafe_convert` only where appropriate.")
+        println("=== End tips ===\n")
+
+        # rethrow
+        rethrow_err && rethrow(err)
+    end
+end
+
+
+function test_a_res_gpu(prob; model, model_gpu, M = 2)
+testCase = prob()
+N_spec = MVector((testCase.T.N)...)
+U_spec = testCase.T.U
+V_spec = testCase.T.V
+T_spec = PreFlash.compute_single_phase_state(U_spec, V_spec, N_spec, model)
+# Convert to GPU
+N_spec_gpu = cu(N_spec)
+# out = CUDA.zeros(Float64, model_gpu.Nc)
+out = zeros(Float64, model_gpu.Nc)
+# x = CUDA.zeros(Float64, model_gpu.Nc)
+# @show typeof(N_spec)
+N = model.Nc
+x = CuArray([1.0, 2.0])
+dx = CuArray([0.0, 0.0])
+y = CUDA.zeros(Float32, N)
+dy = CUDA.zeros(Float32, N)
+
+RT = model.R * T_spec
+F = z -> EOS.a_ideal(T_spec, V_spec, z; model)
+∂F_N = ForwardDiff.gradient(F, N_spec)
+# mu1 = EosGPU.da_ideal_dzi(T_spec, V_spec, N_spec, model, 1)
+mu = EOS.chem_pot(T_spec, V_spec, N_spec; model)
+mu_out = CUDA.zeros(Float32, model.Nc)
+x_local = CUDA.zeros(Float32, model.Nc)
+mu_out = EosGPU.launch_mu_batch(T_spec, V_spec, N_spec; model = model_gpu, M)
+# @show Array(mu_out), mu
+return mu_out
+# try
+# @cuda threads=1 EosGPU.μ_tot(1, T_spec, V_spec, N_spec_gpu, model_gpu, x_local, mu_out)
+# # synchronize()
+# catch error
+#         @error "Caught exception" exception=error
+
+#         println("\n=== Cthulhu-style typed code for the error ===")
+#         try
+#             code_typed(error; interactive = true)
+#         catch inner
+#             @warn "code_typed could not introspect this error" exception=inner
+#         end
+
+#         rethrow(error)   # optional: crash after introspection
+# end
+# @show Array(mu_out), mu
+# synchronize()
+# mu2 = EosGPU.μ_tot(2, T_spec, V_spec, N_spec, model_gpu)
+# @show ∂F_N
+# @show mu, mu2, mu1
+# @show a_res_device
+# @show a_res_cpu
+end
+
+res =test_a_res_gpu(Problems.prob_1; model=model_1_4, model_gpu =model_1_4_gpu, M = 1_000_000_00);
+nothing
+
+
+kwargs_1_4_gpu = (;
+    Mw =  SA[16.04e-3, 34.083e-3],
+    T_c = SA[190.4, 373.2],  # Critical temperatures in K
+    P_c = SA[46.0e5, 89.4e5],  # Critical pressures in Pa    
+    ρ_c = SA[10139.0, 10190.0],
+    ω = SA[0.011, 0.081], #0.0810919       # Acentric factors
+    # ω=[0.011, 0.008], #0.0810919       # Acentric factors
+    δ = SA[0.0 0.083; 0.083 0.0],
+    α = SA[
+        19.25 5.213e-2 1.197e-5 -1.132e-8
+        31.94 1.463e-3 2.432e-5 -1.176e-8
+    ],
+)
+
+
+
+model_1_4_gpu = EosGPU.PengRobinson_gpu(; kwargs_1_4_gpu...);
+
+res = EosGPU.test_kernel(2, model_1_4_gpu);
+mu_res = EosGPU.test_mu_res_kernel(2, model_1_4_gpu);
+
+
 test_flash_calculation_gpu(Problems.prob_5; model=model_5_6)
 nothing
 
@@ -629,48 +837,6 @@ x_cpu, x_gpu =test_VT_stabilityAnalysis_gpu(Problems.prob_6; model=model_5_6);
 
 x_cpu, x_gpu =quick_test_generate_all_initial_approximations_gpu(Problems.prob_5; model=model_5_6, rng_seed=12345)
 
-quick_test_perturbed_guesses_gpu(Problems.prob_1; k=5, model=model_1_4)
-x_cpu, x_gpu = quick_test_saturation_based_guesses_gpu(Problems.prob_1; model=model_1_4)
-quick_test_smejkal(Problems.prob_1; model=model_1_4)
-test_gpu_coverSimplex(model_1_4)
-test_gpu_coverSimplex(model_5_6)
-nothing
-X = Stability.coverSimplex(; model = model_5_6)
-X_gpu =Stability.coverSimplex_gpu(; model = model_5_6)'
-nothing
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 run_flash_calculations(Problems.prob_1, model_1_4)
 run_flash_calculations(Problems.prob_2, model_1_4)
 run_flash_calculations(Problems.prob_3, model_1_4)
@@ -678,37 +844,6 @@ run_flash_calculations(Problems.prob_4, model_1_4)
 run_flash_calculations(Problems.prob_5, model_5_6)
 run_flash_calculations(Problems.prob_6, model_5_6)
 
-function kernel!(N)
-    i = threadIdx().x
-    sv = N[i]        # Fetch SVector from CuArray
-    val = sv[1]      # Access element safely on GPU
-    # N[i] = Base.setindex(sv, val + 1.0, 1)
-    for k in 1:7
-        val = @inbounds N[i][k]
-        @cuprint( val, " ")
-    end
-    
-    nothing
-end
-
-@cuda threads=10 kernel!(N_d)
-
-function flash_kernel(U_d, V_d, N_d, results)
-    # global thread id
-    gid = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    
-    # bounds check
-    if gid > length(U_d)
-        return
-    end
-
-    U_spec = @inbounds U_d[gid]   # scalar Float64
-    V_spec = @inbounds V_d[gid]   # scalar Float64
-    N_spec = @inbounds N_d[gid]    # returns SVector{Nc,Float64}
-    # Now thread gid works on the gid-th UVN spec
-
-    @inbounds results[gid] = Sols.solve_UVFlash_QFuncVer3(U_spec, V_spec, N_spec; model=model_1_4)
-end
 
 Nbatch = 10000
 Nc = 6
@@ -729,12 +864,12 @@ CUDA.versioninfo()
 A1 = CuArray(rand(Float32, 10000, 10000))
 B1 = CuArray(rand(Float32, 10000, 10000))
 
-@time C1 = A1 * B1 # Runs on GPU using cuBLAS
+@time C1 = A1 * B1; # Runs on GPU using cuBLAS
 
-A = rand(Float32, 10000, 10000)
-B = rand(Float32, 10000, 10000)
+A = rand(Float32, 10000, 10000);
+B = rand(Float32, 10000, 10000);
 
-@time C = A * B  # Runs on GPU using cuBLAS
+@time C = A * B;  # Runs on CPU
 CUDA.functional()
 CUDA.synchronize()
 
@@ -753,3 +888,76 @@ println("Warp size: ", CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_WARP_SIZE))
 println("Max threads/block: ", CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK))
 println("Concurrent kernels: ", CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_CONCURRENT_KERNELS))
 println("Async engines: ", CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_ASYNC_ENGINE_COUNT))
+
+
+
+
+
+# simple kernel — writes z .= x + 2*y (GPU device code)
+function mykernel!(z, x, y)
+    i = (blockIdx().x-1)*blockDim().x + threadIdx().x
+    if i <= length(z)
+        z[i] = x[i] + 2f0 * y[i]
+    end
+    return
+end
+
+function call_kernel!(z::CuDeviceVector{Float32},
+                      x::CuDeviceVector{Float32},
+                      y::CuDeviceVector{Float32})
+    N = length(z)
+    threads = 256
+    blocks = cld(N, threads)
+    @cuda threads=threads blocks=blocks mykernel!(z, x, y)
+    return nothing
+end
+
+function forward_and_grad(x::CuArray{Float32},
+                          y::CuArray{Float32})
+    N = length(x)
+    z = CUDA.zeros(Float32, N)
+
+    # Allocate gradient buffers
+    dz = CUDA.ones(Float32, N)          # seed/output-adjoint (for reverse mode)
+    dx = CUDA.zeros(Float32, N)         # gradient w.r.t x
+    dy = CUDA.zeros(Float32, N)         # gradient w.r.t y
+
+    # call Enzyme to differentiate call_kernel! w.r.t x and y
+    Enzyme.autodiff(
+      Enzyme.Reverse,
+      call_kernel!,
+      Enzyme.DuplicatedNoNeed(z, dz),  # treat z as output with seed dz
+      Enzyme.Duplicated(x, dx),        # differentiate w.r.t x
+      Enzyme.Duplicated(y, dy)         # differentiate w.r.t y
+    )
+
+    return dx, dy
+end
+
+# Example usage
+N = 10
+x = CUDA.randn(Float32, N)
+y = CUDA.randn(Float32, N)
+dx, dy = forward_and_grad(x, y)
+
+function gpu_func(x, y)
+    z = x .+ 2 .* y       # elementwise operations on CuArray
+    w = z .^ 2
+    return sum(w)         # can also include other differentiable GPU calls
+end
+
+x = cu(rand(Float32, 10))
+y = cu(rand(Float32, 10))
+dx = CUDA.zeros(Float32, 10)
+dy = CUDA.zeros(Float32, 10)
+dz_dx = Enzyme.autodiff_deferred(Enzyme.Reverse, Const(gpu_func), Active, Duplicated(x, dx), Duplicated(y, dy))
+dz_dy = Enzyme.autodiff_deferred(Enzyme.Reverse, gpu_func, y)
+
+AutoDiffGPU.test()
+
+using ForwardDiff, CUDA
+CUDA.allowscalar()
+f(x) = sum(x .^ 2)  # simple sum-of-squares function
+z = cu([1.0, 2.0, 3.0])  # CuArray input
+grad = ForwardDiff.gradient(f, z)  # works with CuArrays
+println("Gradient: ", grad)  # should be [2.0, 4.0, 6.0]

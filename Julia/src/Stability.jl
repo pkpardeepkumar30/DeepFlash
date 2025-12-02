@@ -571,7 +571,7 @@ function coverSimplex(; model)
         X[i] = 0.5 * (V[i-1] .+ barycenter)
         
     end
-    @show X
+    # @show X
     return X
 end
 

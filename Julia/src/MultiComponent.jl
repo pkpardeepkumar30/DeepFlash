@@ -12,7 +12,9 @@ using Clapeyron
 include("Problems.jl")
 include("Solvers.jl")
 include("Scalers.jl")
+include("AutoDiffGPU.jl")
 include("EOS.jl")
+include("EosGPU.jl")
 include("CubicFuncs.jl")
 # include("PTFlash.jl")
 include("Flash.jl")
@@ -22,6 +24,7 @@ include("PreFlash.jl")
 include("PreFlashGPU.jl")
 
 
-export Problems, EOS, CubicFuncs, Solvers, Flash, Stability, StabilityGPU, Scalers, PreFlash, PreFlashGPU
+
+export Problems, EOS, EosGPU, CubicFuncs, Solvers, Flash, Stability, StabilityGPU, Scalers, PreFlash, PreFlashGPU, AutoDiffGPU
 
 end
